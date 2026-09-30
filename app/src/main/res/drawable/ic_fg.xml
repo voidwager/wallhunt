@@ -1,0 +1,11 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- Phone frame with a crosshair over a mountain horizon -->
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    android:width="108dp" android:height="108dp" android:viewportWidth="108" android:viewportHeight="108">
+    <path android:strokeColor="#FFFFFF" android:strokeWidth="4" android:fillColor="#00000000"
+        android:pathData="M42,28 h24 a5,5 0 0 1 5,5 v42 a5,5 0 0 1 -5,5 h-24 a5,5 0 0 1 -5,-5 v-42 a5,5 0 0 1 5,-5 z" />
+    <path android:fillColor="#E0A458"
+        android:pathData="M37,72 l10,-14 l6,8 l5,-6 l13,12 z" />
+    <path android:strokeColor="#E0A458" android:strokeWidth="3" android:fillColor="#00000000"
+        android:pathData="M54,38 m-6,0 a6,6 0 1 0 12,0 a6,6 0 1 0 -12,0 M54,29 v4 M54,43 v4 M45,38 h4 M59,38 h4" />
+</vector>
