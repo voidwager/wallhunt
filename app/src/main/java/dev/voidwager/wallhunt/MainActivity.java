@@ -101,7 +101,16 @@ public class MainActivity extends Activity {
         title.setTextColor(INK);
         title.setTextSize(22);
         title.setTypeface(android.graphics.Typeface.DEFAULT_BOLD);
-        head.addView(title, new LinearLayout.LayoutParams(0, -2, 1));
+        TextView version = new TextView(this);
+        version.setText("v" + Updater.installedVersion(this) + " · updates");
+        version.setTextColor(DIM);
+        version.setTextSize(11);
+        LinearLayout brand = new LinearLayout(this);
+        brand.setOrientation(LinearLayout.VERTICAL);
+        brand.addView(title);
+        brand.addView(version);
+        brand.setOnClickListener(v -> about());
+        head.addView(brand, new LinearLayout.LayoutParams(0, -2, 1));
         Button histBtn = button("History", false);
         histBtn.setOnClickListener(v -> startActivity(new Intent(this, HistoryActivity.class)));
         head.addView(histBtn);
@@ -429,6 +438,45 @@ public class MainActivity extends Activity {
                 .setPositiveButton("Install", (d, x) -> installUpdate(r))
                 .setNegativeButton("Later", null)
                 .show());
+    }
+
+    /** Version, last update check, and a manual "Check now". */
+    private void about() {
+        long at = prefs().getLong("upd_at", 0);
+        String last = at == 0 ? "never"
+                : System.currentTimeMillis() - at < 60_000 ? "just now"
+                : android.text.format.DateUtils.getRelativeTimeSpanString(at, System.currentTimeMillis(),
+                        android.text.format.DateUtils.MINUTE_IN_MILLIS).toString();
+        new AlertDialog.Builder(this)
+                .setTitle("Wallhunt " + Updater.installedVersion(this))
+                .setMessage("Updates come from github.com/" + Updater.REPO + ". It checks by itself every 6 hours "
+                        + "while open.\n\nLast checked: " + last)
+                .setPositiveButton("Check now", (d, x) -> checkNow())
+                .setNegativeButton("Close", null)
+                .show();
+    }
+
+    private void checkNow() {
+        if (busy) return;
+        setBusy(true);
+        say("Checking GitHub for updates...");
+        worker.execute(() -> {
+            String err = Updater.check(prefs());
+            main.post(() -> {
+                setBusy(false);
+                showUpdate();
+                if (err != null) {
+                    status.setText("Couldn't check for updates: " + err);
+                    return;
+                }
+                Updater.Release r = Updater.available(this, prefs());
+                if (r == null) status.setText("You're on the latest version (" + Updater.installedVersion(this) + ").");
+                else {
+                    status.setText("Wallhunt " + r.version + " is available.");
+                    update.performClick();
+                }
+            });
+        });
     }
 
     private void installUpdate(Updater.Release r) {

@@ -41,7 +41,8 @@ Wallhunt updates itself from this repo's GitHub releases. While the app is open 
 latest release at most every 6 hours. When there's a newer version, an **Update** button appears. The downloaded
 APK is only installed if it has the same package name, a higher version, and the same signing certificate as
 the installed app, and Android's installer asks you to confirm first. The first update asks you to allow
-*Install unknown apps* for Wallhunt.
+*Install unknown apps* for Wallhunt. To check right away, tap the **Wallhunt** title (it shows your version)
+and choose **Check now**.
 
 Versions before 1.2 have no updater: install 1.2 once by hand, and later versions arrive in the app.
 
