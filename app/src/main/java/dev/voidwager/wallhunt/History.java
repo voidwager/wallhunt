@@ -69,7 +69,21 @@ final class History {
     private final File dir;
     private final List<Entry> log = new ArrayList<>();
 
-    History(Context ctx, SharedPreferences prefs) {
+    private static History shared;
+
+    /**
+     * The one History for the whole app. Screens get recreated (setting a wallpaper does it), and a set still
+     * finishing on the old screen must land in the same log the new screen reads.
+     */
+    static synchronized History get(Context c) {
+        if (shared == null) {
+            Context app = c.getApplicationContext();
+            shared = new History(app, app.getSharedPreferences(MainActivity.PREFS, Context.MODE_PRIVATE));
+        }
+        return shared;
+    }
+
+    private History(Context ctx, SharedPreferences prefs) {
         this.wm = WallpaperManager.getInstance(ctx);
         this.prefs = prefs;
         this.dir = new File(ctx.getFilesDir(), "history");

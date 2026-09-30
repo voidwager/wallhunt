@@ -16,8 +16,8 @@ android {
         minSdk = 30
         targetSdk = 36
         // -PwhVersionCode / -PwhVersionName exist only to build an "older" copy for update testing.
-        versionCode = (project.findProperty('whVersionCode') ?: 6) as int
-        versionName = project.findProperty('whVersionName') ?: '1.5'
+        versionCode = (project.findProperty('whVersionCode') ?: 7) as int
+        versionName = project.findProperty('whVersionName') ?: '1.6'
     }
     signingConfigs {
         pinned {

@@ -53,6 +53,31 @@ final class Sources {
 
     static boolean needsKey(String source) { return source.equals(UNSPLASH) || source.equals(PEXELS); }
 
+    private static final java.util.Set<String> FILLER = new java.util.HashSet<>(java.util.Arrays.asList(
+            "a", "an", "the", "of", "with", "and", "or", "in", "on", "at", "for", "to", "from", "some", "very",
+            "wallpaper", "wallpapers", "background", "backgrounds", "phone", "mobile", "lockscreen", "homescreen",
+            "image", "images", "picture", "pictures", "pic", "pics", "hd", "4k", "8k", "uhd",
+            "i", "me", "my", "want", "like", "please", "something", "that", "is", "it", "give", "show", "find"));
+
+    /**
+     * Search queries straight from the prompt, for when Claude isn't planning: the prompt's keywords
+     * (filler dropped, up to four), then its first two keywords as a looser second try.
+     */
+    static List<String> keywordQueries(String prompt) {
+        List<String> kept = new ArrayList<>();
+        for (String w : prompt.toLowerCase(java.util.Locale.ROOT).replaceAll("[^\\p{L}\\p{N}]+", " ").trim().split(" ")) {
+            if (!w.isEmpty() && !FILLER.contains(w) && !kept.contains(w)) kept.add(w);
+        }
+        List<String> out = new ArrayList<>();
+        if (kept.isEmpty()) {           // the prompt was all filler, e.g. "hd wallpaper"
+            out.add(prompt.trim());
+            return out;
+        }
+        out.add(String.join(" ", kept.subList(0, Math.min(4, kept.size()))));
+        if (kept.size() > 2) out.add(kept.get(0) + " " + kept.get(1));
+        return out;
+    }
+
     /**
      * Runs every query on one source and keeps up to {@code max} distinct portrait images at least
      * {@code minW}x{@code minH}. {@code key} is ignored by sources that don't need one.

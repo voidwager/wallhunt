@@ -53,7 +53,7 @@ public class HistoryActivity extends Activity {
         getWindow().setNavigationBarColor(Ui.BG);
         Rect s = getWindowManager().getMaximumWindowMetrics().getBounds();
         aspect = (float) s.height() / s.width();
-        history = new History(this, getSharedPreferences(MainActivity.PREFS, MODE_PRIVATE));
+        history = History.get(this);
         setContentView(build());
         render();
     }

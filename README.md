@@ -1,19 +1,27 @@
 # Wallhunt
 
-Describe a wallpaper, and Claude finds it. Wallhunt turns a prompt like *"rainy neon street, calm"* into
-image searches, looks at what comes back, and ranks the candidates as phone wallpapers. Pick one and set it on the home screen, lock screen, or both.
+Describe a wallpaper, and Wallhunt searches free wallpaper and photo sites for it. Type something like
+*"rainy neon street, calm"*, scroll the results, and set the one you like on the home screen, lock screen, or both.
+No account or key is needed.
 
 Android 11+.
 
 ## How it works
 
-1. **Plan.** Claude (Opus 5.5, low effort) picks the one or two sources that suit the prompt and writes 2–3
-   short keyword queries.
-2. **Search.** Each source returns SFW portrait images at least 1080×1920. If fewer than four turn up, Wallhunt
-   also tries your other sources, then retries each query on its leading keyword.
-3. **Look.** Up to 12 thumbnails are centre-cropped to your screen's exact aspect ratio, so Claude judges what
-   will actually be on screen, then ranks up to five (medium effort) with a one-line reason each.
-4. **Set.** The full image is downloaded, cropped to the screen and applied. *Next pick* steps down the ranking.
+1. **Search.** Your prompt becomes keyword searches ("rainy neon street calm", then "rainy neon"), with filler
+   like "wallpaper" or "the" dropped. Every source you can use is searched at once, and the results are mixed
+   together, up to 30 SFW portrait images of at least 1080×1920. If fewer than four turn up, each search is
+   retried on its first keyword.
+2. **Pick.** The results appear as a grid, each tile tagged with its source. Tap one to preview it exactly as it
+   will be cropped for your screen.
+3. **Set.** Home, Lock or Both applies it. *‹ Results* (or the back gesture) returns to the grid.
+
+### Optional: AI picks with Claude
+
+Claude is a paid API, so it's off unless you add a key under **Keys**. With a key, Claude (Opus 5.5) chooses
+the sources and search words that suit your prompt. It then looks at the first 12 results, cropped exactly as
+they'll appear, and moves its top five to the front of the grid with a badge and a one-line reason. If Claude
+fails (bad key, rate limit, declined), you get the plain results with a note instead.
 
 ### Sources
 
@@ -48,10 +56,12 @@ Versions before 1.2 have no updater: install 1.2 once by hand, and later version
 
 ## Setup
 
-You need a Claude API key from [console.anthropic.com](https://console.anthropic.com). Wallhunt asks for it on
-first launch (or tap **Keys**) and stores it only on the phone. Unsplash and Pexels keys are optional. Add them in
-the same dialog to switch those sources on. A new Unsplash key allows 50 searches an hour. Each hunt makes two Claude requests, and the
-second one includes the thumbnails.
+Nothing to set up: Wallhaven and Openverse work without any key. Every key under **Keys** is optional and
+stays on the phone:
+
+- **Unsplash** and **Pexels** (free) add those photo sources. A new Unsplash key allows 50 searches an hour.
+- **Claude** (paid, [console.anthropic.com](https://console.anthropic.com)) turns on AI picks. Each search then
+  makes two Claude requests, and the second one includes 12 thumbnails.
 
 ## Build
 

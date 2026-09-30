@@ -25,10 +25,14 @@ import android.view.inputmethod.EditorInfo;
 import android.view.inputmethod.InputMethodManager;
 import android.widget.Button;
 import android.widget.EditText;
+import android.widget.FrameLayout;
 import android.widget.ImageView;
 import android.widget.LinearLayout;
+import android.widget.ScrollView;
 import android.widget.TextView;
 import android.widget.Toast;
+import android.window.OnBackInvokedCallback;
+import android.window.OnBackInvokedDispatcher;
 
 import com.anthropic.errors.AnthropicIoException;
 import com.anthropic.errors.AnthropicServiceException;
@@ -39,50 +43,112 @@ import com.anthropic.errors.UnauthorizedException;
 import java.io.ByteArrayOutputStream;
 import java.io.IOException;
 import java.util.ArrayList;
+import java.util.HashMap;
 import java.util.List;
+import java.util.Map;
+import java.util.concurrent.ExecutionException;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
+import java.util.concurrent.Future;
 
 public class MainActivity extends Activity {
     static final String PREFS = "wh";
     private static final String KEY = "api_key";
     private static final int BG = Ui.BG, CARD = Ui.CARD, INK = Ui.INK, DIM = Ui.DIM, ACCENT = Ui.ACCENT;
+    private static final int MAX_RESULTS = 30, RANKED = 12, COLS = 3;
 
     private final ExecutorService worker = Executors.newSingleThreadExecutor();
+    private final ExecutorService thumbLoader = Executors.newFixedThreadPool(4);
     private final Handler main = new Handler(Looper.getMainLooper());
 
     private EditText prompt;
-    private Button hunt, next, home, lock, both, source;
+    private Button hunt, back, home, lock, both, source;
     private TextView status, reason, credit;
     private ImageView preview;
+    private ScrollView results;
+    private LinearLayout grid, previewPane;
 
-    private Hunter hunter;
+    private Hunter hunter;          // null when no Claude key: plain keyword search, you pick from the grid
     private List<Sources.Wall> walls = new ArrayList<>();
-    private List<Hunter.Pick> picks = new ArrayList<>();
-    private int pos;
+    private final Map<String, String> why = new HashMap<>();      // Claude's reason, by wall id
+    private Sources.Wall shown;     // the wall in the preview
+    private String summary = "";    // status line for the grid
+    private int generation;         // bumps per search, so late thumbnails from an old one are dropped
     private Bitmap current;
-    private boolean busy;
+    private boolean busy, backRegistered;
     private History history;
     private Button undo, update;
     private String lastPrompt = "";
+
+    private final OnBackInvokedCallback backToGrid = this::showGrid;
 
     @Override
     protected void onCreate(Bundle state) {
         super.onCreate(state);
         getWindow().setStatusBarColor(BG);
         getWindow().setNavigationBarColor(BG);
-        history = new History(this, prefs());
+        history = History.get(this);
         setContentView(build());
         enable(undo, history.canRevert());
         String key = prefs().getString(KEY, "");
-        showResult(false);
-        if (key.isEmpty()) askKey(); else hunter = new Hunter(key);
+        hunter = key.isEmpty() ? null : new Hunter(key);
+        showNothing();
+        status.setText(intro());
+        restore((Kept) getLastNonConfigurationInstance());
+    }
+
+    /**
+     * What survives Android recreating this screen. Setting a wallpaper recreates it (Android 12+ re-themes
+     * apps from the new wallpaper's colours), and so does rotating; without this, results vanish on every set.
+     */
+    private static final class Kept {
+        List<Sources.Wall> walls;
+        Map<String, String> why;
+        Sources.Wall shown;
+        Bitmap current;
+        String summary, lastPrompt;
+        boolean previewing;
+    }
+
+    @Override
+    public Object onRetainNonConfigurationInstance() {
+        Kept k = new Kept();
+        k.walls = walls;
+        k.why = new HashMap<>(why);
+        k.shown = shown;
+        k.current = current;
+        k.summary = summary;
+        k.lastPrompt = lastPrompt;
+        k.previewing = previewPane.getVisibility() == View.VISIBLE;
+        return k;
+    }
+
+    private void restore(Kept k) {
+        if (k == null || k.walls.isEmpty()) return;
+        walls = k.walls;
+        why.putAll(k.why);
+        shown = k.shown;
+        current = k.current;
+        summary = k.summary;
+        lastPrompt = k.lastPrompt;
+        fillGrid();
+        if (k.previewing && shown != null && current != null) showWall();
+        else showGrid();
     }
 
     @Override
     protected void onDestroy() {
-        worker.shutdownNow();
+        // Only being recreated (e.g. by the wallpaper we just set): let a running save finish, cut the rest.
+        if (isChangingConfigurations()) worker.shutdown();
+        else worker.shutdownNow();
+        thumbLoader.shutdownNow();
         super.onDestroy();
+    }
+
+    private String intro() {
+        return hunter == null
+                ? "Describe a wallpaper and tap Hunt. Optional: add a Claude key under Keys to have AI rank the results."
+                : "Describe a wallpaper. Claude picks where to search and ranks what it finds.";
     }
 
     private View build() {
@@ -159,16 +225,29 @@ public class MainActivity extends Activity {
         status = new TextView(this);
         status.setTextColor(DIM);
         status.setTextSize(13);
-        status.setText("Describe a wallpaper. Claude picks where to search, looks at what it finds and ranks it.");
         LinearLayout.LayoutParams stp = new LinearLayout.LayoutParams(-1, -2);
         stp.topMargin = dp(10);
         root.addView(status, stp);
 
+        // The stage below the status line shows either the results grid or one wall's preview.
+        FrameLayout stage = new FrameLayout(this);
+        LinearLayout.LayoutParams stg = new LinearLayout.LayoutParams(-1, 0, 1);
+        stg.topMargin = dp(12);
+        root.addView(stage, stg);
+
+        results = new ScrollView(this);
+        grid = new LinearLayout(this);
+        grid.setOrientation(LinearLayout.VERTICAL);
+        results.addView(grid);
+        stage.addView(results, new FrameLayout.LayoutParams(-1, -1));
+
+        previewPane = new LinearLayout(this);
+        previewPane.setOrientation(LinearLayout.VERTICAL);
+        stage.addView(previewPane, new FrameLayout.LayoutParams(-1, -1));
+
         preview = new ImageView(this);
         preview.setScaleType(ImageView.ScaleType.FIT_CENTER);
-        LinearLayout.LayoutParams pp = new LinearLayout.LayoutParams(-1, 0, 1);
-        pp.topMargin = dp(12);
-        root.addView(preview, pp);
+        previewPane.addView(preview, new LinearLayout.LayoutParams(-1, 0, 1));
 
         reason = new TextView(this);
         reason.setTextColor(INK);
@@ -176,31 +255,35 @@ public class MainActivity extends Activity {
         reason.setGravity(Gravity.CENTER_HORIZONTAL);
         LinearLayout.LayoutParams rp = new LinearLayout.LayoutParams(-1, -2);
         rp.topMargin = dp(8);
-        root.addView(reason, rp);
+        previewPane.addView(reason, rp);
 
         credit = new TextView(this);
         credit.setTextColor(DIM);
         credit.setTextSize(12);
         credit.setGravity(Gravity.CENTER_HORIZONTAL);
         credit.setOnClickListener(v -> {
-            Sources.Wall w = walls.get(picks.get(pos).index);
-            if (!w.creditUrl.isEmpty()) startActivity(new Intent(Intent.ACTION_VIEW, Uri.parse(w.creditUrl)));
+            if (shown != null && !shown.creditUrl.isEmpty()) {
+                startActivity(new Intent(Intent.ACTION_VIEW, Uri.parse(shown.creditUrl)));
+            }
         });
         LinearLayout.LayoutParams crp = new LinearLayout.LayoutParams(-1, -2);
         crp.topMargin = dp(2);
-        root.addView(credit, crp);
+        previewPane.addView(credit, crp);
 
         LinearLayout nav = row();
-        next = button("Next pick", false);
-        next.setOnClickListener(v -> showPick(pos + 1));
+        back = button("‹ Results", false);
+        back.setOnClickListener(v -> showGrid());
         source = button("Open source", false);
-        source.setOnClickListener(v -> startActivity(new Intent(Intent.ACTION_VIEW,
-                Uri.parse(walls.get(picks.get(pos).index).page))));
-        nav.addView(next, new LinearLayout.LayoutParams(0, -2, 1));
-        nav.addView(source, new LinearLayout.LayoutParams(0, -2, 1));
+        source.setOnClickListener(v -> {
+            if (shown != null) startActivity(new Intent(Intent.ACTION_VIEW, Uri.parse(shown.page)));
+        });
+        nav.addView(back, new LinearLayout.LayoutParams(0, -2, 1));
+        LinearLayout.LayoutParams sb = new LinearLayout.LayoutParams(0, -2, 1);
+        sb.leftMargin = dp(6);
+        nav.addView(source, sb);
         LinearLayout.LayoutParams np = new LinearLayout.LayoutParams(-1, -2);
         np.topMargin = dp(8);
-        root.addView(nav, np);
+        previewPane.addView(nav, np);
 
         LinearLayout set = row();
         home = button("Home", true);
@@ -215,7 +298,9 @@ public class MainActivity extends Activity {
             bp.rightMargin = dp(3);
             set.addView(b, bp);
         }
-        root.addView(set, new LinearLayout.LayoutParams(-1, -2));
+        LinearLayout.LayoutParams setp = new LinearLayout.LayoutParams(-1, -2);
+        setp.topMargin = dp(6);
+        previewPane.addView(set, setp);
         return root;
     }
 
@@ -224,97 +309,217 @@ public class MainActivity extends Activity {
     private void startHunt() {
         String q = prompt.getText().toString().trim();
         if (busy || q.isEmpty()) return;
-        if (hunter == null) { askKey(); return; }
         getSystemService(InputMethodManager.class).hideSoftInputFromWindow(prompt.getWindowToken(), 0);
         setBusy(true);
-        showResult(false);
+        showNothing();
         Rect screen = screen();
+        Hunter ai = hunter;
         worker.execute(() -> {
             try {
-                say("Claude is working out what to search for...");
                 List<String> available = available();
-                Hunter.Plan plan = hunter.plan(q, available);
+                List<String> sources = available, queries = Sources.keywordQueries(q);
+                Hunter.Plan plan = null;
+                String note = "";
+                if (ai != null) {
+                    try {
+                        say("Claude is working out what to search for...");
+                        plan = ai.plan(q, available);
+                        sources = plan.sources;
+                        queries = plan.queries;
+                    } catch (Exception e) {
+                        note = claudeProblem(e) + " Showing plain search results.";
+                    }
+                }
                 int minW = Math.min(screen.width(), 1080), minH = Math.min(screen.height(), 1920);
                 List<Sources.Wall> found = new ArrayList<>();
                 List<String> problems = new ArrayList<>();
-                say("Searching " + names(plan.sources) + ": " + String.join(" / ", plan.queries));
-                gather(found, plan.sources, plan.queries, minW, minH, problems);
+                say("Searching " + names(sources) + ": " + String.join(" / ", queries));
+                gather(found, sources, queries, minW, minH, problems);
                 List<String> others = new ArrayList<>(available);
-                others.removeAll(plan.sources);
+                others.removeAll(sources);
                 if (found.size() < 4 && !others.isEmpty()) {
                     say("Few matches, also trying " + names(others) + "...");
-                    gather(found, others, plan.queries, minW, minH, problems);
+                    gather(found, others, queries, minW, minH, problems);
                 }
                 if (found.size() < 4) {
                     // Portrait images are scarce; retry each query on its leading keyword before giving up.
                     List<String> broad = new ArrayList<>();
-                    for (String s : plan.queries) broad.add(s.trim().split("\\s+")[0]);
+                    for (String s : queries) {
+                        String w = s.trim().split("\\s+")[0];
+                        if (!broad.contains(w)) broad.add(w);
+                    }
                     say("Still few, widening to: " + String.join(" / ", broad));
                     gather(found, available, broad, minW, minH, problems);
                 }
                 if (found.isEmpty()) {
-                    fail("No portrait images matched " + plan.queries + ". Try broader words."
-                            + (problems.isEmpty() ? "" : "\n" + String.join("\n", problems)));
+                    fail((note.isEmpty() ? "" : note + "\n") + "No portrait images matched " + queries
+                            + ". Try broader words." + (problems.isEmpty() ? "" : "\n" + String.join("\n", problems)));
                     return;
                 }
-                say("Fetching " + found.size() + " thumbnails...");
-                List<byte[]> thumbs = new ArrayList<>();
-                // Crop each thumbnail the way fitScreen will crop the full image, so Claude judges what you get.
-                for (Sources.Wall w : found) thumbs.add(screenCrop(Sources.get(w.thumb), screen));
-                say("Claude is looking at " + found.size() + " candidates...");
-                List<Hunter.Pick> ranked = hunter.rank(q, plan.look, found, thumbs);
-                if (ranked.isEmpty()) {
-                    fail("Claude rejected all " + found.size() + " candidates. Rephrase and try again.");
-                    return;
+
+                Map<String, String> reasons = new HashMap<>();
+                if (plan != null) {
+                    try {
+                        List<Sources.Wall> judged = new ArrayList<>(found.subList(0, Math.min(RANKED, found.size())));
+                        say("Fetching " + judged.size() + " thumbnails for Claude...");
+                        List<byte[]> thumbs = new ArrayList<>();
+                        // Crop each thumbnail the way fitScreen will crop the full image, so Claude judges what you get.
+                        for (Sources.Wall w : judged) thumbs.add(screenCrop(Sources.get(w.thumb), screen));
+                        say("Claude is looking at " + judged.size() + " candidates...");
+                        List<Sources.Wall> top = new ArrayList<>();
+                        for (Hunter.Pick p : ai.rank(q, plan.look, judged, thumbs)) {
+                            Sources.Wall w = judged.get(p.index);
+                            if (top.contains(w)) continue;
+                            top.add(w);
+                            reasons.put(w.id, "#" + top.size() + " · " + p.why);
+                        }
+                        found.removeAll(top);
+                        found.addAll(0, top);
+                    } catch (Exception e) {
+                        note = claudeProblem(e) + " Showing results unranked.";
+                    }
                 }
+                String sum = found.size() + " results from " + names(sourcesOf(found))
+                        + (reasons.isEmpty() ? "" : " · Claude's top " + reasons.size() + " first")
+                        + ". Tap one to preview." + (note.isEmpty() ? "" : "\n" + note)
+                        + (problems.isEmpty() ? "" : "\n" + String.join("\n", problems));
                 main.post(() -> {
                     walls = found;
+                    why.clear();
+                    why.putAll(reasons);
                     lastPrompt = q;
-                    picks = ranked;
-                    showPick(0);
+                    summary = sum;
+                    setBusy(false);
+                    fillGrid();
+                    showGrid();
                 });
-            } catch (Hunter.RefusedException e) {
-                fail(e.getMessage());
-            } catch (UnauthorizedException | PermissionDeniedException e) {
-                fail("The Claude API key was rejected. Tap Keys to replace it.");
-            } catch (RateLimitException e) {
-                fail("Rate limited by the Claude API. Wait a minute and try again.");
-            } catch (AnthropicServiceException e) {
-                fail("Claude API error " + e.statusCode() + ": " + e.getMessage());
-            } catch (AnthropicIoException | IOException e) {
-                fail("Network problem: " + e.getMessage());
             } catch (RuntimeException e) {
-                fail("Something broke: " + e);
+                fail("Something went wrong: " + e.getMessage());
             }
         });
     }
 
-    private void showPick(int i) {
-        if (i >= picks.size() || busy) return;
-        pos = i;
-        Hunter.Pick p = picks.get(i);
-        Sources.Wall w = walls.get(p.index);
+    /** A Claude failure as one short sentence; the hunt carries on without it. */
+    private static String claudeProblem(Exception e) {
+        if (e instanceof Hunter.RefusedException) return "Claude declined this one.";
+        if (e instanceof UnauthorizedException || e instanceof PermissionDeniedException) {
+            return "Claude key rejected (fix it under Keys).";
+        }
+        if (e instanceof RateLimitException) return "Claude is rate limited right now.";
+        if (e instanceof AnthropicServiceException) {
+            return "Claude API error " + ((AnthropicServiceException) e).statusCode() + ".";
+        }
+        if (e instanceof AnthropicIoException) return "Couldn't reach Claude.";
+        return "Claude step failed (" + e.getClass().getSimpleName() + ").";
+    }
+
+    private void fillGrid() {
+        int gen = ++generation;
+        grid.removeAllViews();
+        int cellW = (results.getWidth() > 0 ? results.getWidth() : getResources().getDisplayMetrics().widthPixels - dp(32));
+        cellW = (cellW - dp(8) * (COLS - 1)) / COLS;
+        Rect s = screen();
+        int cellH = Math.round(cellW * (float) s.height() / s.width());
+        LinearLayout row = null;
+        for (int i = 0; i < walls.size(); i++) {
+            if (i % COLS == 0) {
+                row = new LinearLayout(this);
+                LinearLayout.LayoutParams rp = new LinearLayout.LayoutParams(-1, -2);
+                rp.bottomMargin = dp(8);
+                grid.addView(row, rp);
+            }
+            LinearLayout.LayoutParams lp = new LinearLayout.LayoutParams(cellW, cellH);
+            if (i % COLS != 0) lp.leftMargin = dp(8);
+            row.addView(cell(walls.get(i), cellW, gen), lp);
+        }
+        results.scrollTo(0, 0);
+    }
+
+    private View cell(Sources.Wall w, int cellW, int gen) {
+        FrameLayout f = new FrameLayout(this);
+        ImageView img = new ImageView(this);
+        img.setScaleType(ImageView.ScaleType.CENTER_CROP);
+        img.setBackground(round(CARD, 10));
+        img.setClipToOutline(true);
+        f.addView(img, new FrameLayout.LayoutParams(-1, -1));
+
+        String r = why.get(w.id);
+        if (r != null) {
+            TextView badge = tag(r.substring(0, r.indexOf(' ')), ACCENT, BG);
+            FrameLayout.LayoutParams bl = new FrameLayout.LayoutParams(-2, -2, Gravity.TOP | Gravity.START);
+            bl.setMargins(dp(6), dp(6), 0, 0);
+            f.addView(badge, bl);
+        }
+        TextView src = tag(Sources.name(w.source), 0xB0000000, INK);
+        FrameLayout.LayoutParams sl = new FrameLayout.LayoutParams(-2, -2, Gravity.BOTTOM | Gravity.START);
+        sl.setMargins(dp(6), 0, 0, dp(6));
+        f.addView(src, sl);
+
+        f.setOnClickListener(v -> openWall(w));
+        thumbLoader.execute(() -> {
+            if (gen != generation) return;
+            try {
+                byte[] data = Sources.get(w.thumb);
+                BitmapFactory.Options o = new BitmapFactory.Options();
+                o.inJustDecodeBounds = true;
+                BitmapFactory.decodeByteArray(data, 0, data.length, o);
+                int sample = 1;
+                while (o.outWidth / (sample * 2) >= cellW) sample *= 2;
+                o = new BitmapFactory.Options();
+                o.inSampleSize = sample;
+                o.inPreferredConfig = Bitmap.Config.RGB_565;
+                Bitmap bm = BitmapFactory.decodeByteArray(data, 0, data.length, o);
+                if (bm != null) main.post(() -> { if (gen == generation) img.setImageBitmap(bm); });
+            } catch (IOException | RuntimeException ignored) {
+                // a missing thumbnail leaves the tile blank; the wall can still be opened
+            }
+        });
+        return f;
+    }
+
+    private TextView tag(String text, int bg, int fg) {
+        TextView t = new TextView(this);
+        t.setText(text);
+        t.setTextSize(11);
+        t.setTextColor(fg);
+        t.setBackground(round(bg, 6));
+        t.setPadding(dp(6), dp(2), dp(6), dp(2));
+        return t;
+    }
+
+    private void openWall(Sources.Wall w) {
+        if (busy) return;
         setBusy(true);
         Rect screen = screen();
         worker.execute(() -> {
             try {
-                say("Downloading pick " + (i + 1) + " of " + picks.size() + " (" + w.resolution + ")...");
+                say("Downloading " + Sources.name(w.source) + " image (" + w.resolution + ")...");
                 Bitmap bm = fitScreen(Sources.get(w.full), screen.width(), screen.height());
                 main.post(() -> {
                     if (current != null) current.recycle();
                     current = bm;
-                    preview.setImageBitmap(bm);
-                    reason.setText(p.why);
-                    credit.setText(w.credit);
-                    source.setText("Open on " + Sources.name(w.source));
-                    status.setText("Pick " + (i + 1) + " of " + picks.size() + " · " + w.resolution);
+                    shown = w;
                     setBusy(false);
-                    showResult(true);
+                    showWall();
                 });
             } catch (IOException | RuntimeException e) {
-                fail("Couldn't load that image: " + e.getMessage());
+                fail("Couldn't load that image (" + e.getMessage() + "). Try another one.");
             }
         });
+    }
+
+    /** Fills the preview pane from {@link #shown} and {@link #current}, and switches to it. */
+    private void showWall() {
+        Sources.Wall w = shown;
+        preview.setImageBitmap(current);
+        String r = why.get(w.id);
+        reason.setText(r == null ? "" : r);
+        reason.setVisibility(r == null ? View.GONE : View.VISIBLE);
+        credit.setText(w.credit);
+        credit.setVisibility(w.credit.isEmpty() ? View.GONE : View.VISIBLE);
+        source.setText("Open on " + Sources.name(w.source));
+        status.setText(Sources.name(w.source) + " · " + w.resolution);
+        showPreview();
     }
 
     private void apply(int which, String where) {
@@ -336,7 +541,7 @@ public class MainActivity extends Activity {
             return;
         }
         Bitmap bm = current;
-        Sources.Wall w = picks.isEmpty() ? null : walls.get(picks.get(pos).index);
+        Sources.Wall w = shown;
         setBusy(true);
         worker.execute(() -> {
             try {
@@ -349,7 +554,7 @@ public class MainActivity extends Activity {
                 }
                 main.post(() -> {
                     setBusy(false);
-                    Toast.makeText(this, "Set on " + where, Toast.LENGTH_SHORT).show();
+                    Toast.makeText(getApplicationContext(), "Set on " + where, Toast.LENGTH_SHORT).show();
                 });
             } catch (IOException e) {
                 fail("Couldn't set the wallpaper: " + e.getMessage());
@@ -365,7 +570,7 @@ public class MainActivity extends Activity {
                 String msg = history.revert();
                 main.post(() -> {
                     setBusy(false);
-                    Toast.makeText(this, msg, Toast.LENGTH_LONG).show();
+                    Toast.makeText(getApplicationContext(), msg, Toast.LENGTH_LONG).show();
                 });
             } catch (IOException e) {
                 fail("Couldn't revert: " + e.getMessage());
@@ -409,15 +614,42 @@ public class MainActivity extends Activity {
         return out.toByteArray();
     }
 
-    // ---- state + helpers ----
+    // ---- which pane shows ----
+
+    private void showNothing() {
+        results.setVisibility(View.GONE);
+        previewPane.setVisibility(View.GONE);
+        setBackToGrid(false);
+    }
+
+    private void showGrid() {
+        results.setVisibility(View.VISIBLE);
+        previewPane.setVisibility(View.GONE);
+        status.setText(summary);
+        setBackToGrid(false);
+    }
+
+    private void showPreview() {
+        results.setVisibility(View.GONE);
+        previewPane.setVisibility(View.VISIBLE);
+        setBackToGrid(true);
+    }
+
+    /** While a preview is open, the system back gesture returns to the grid instead of closing the app. */
+    private void setBackToGrid(boolean on) {
+        if (on == backRegistered) return;
+        OnBackInvokedDispatcher d = getOnBackInvokedDispatcher();
+        if (on) d.registerOnBackInvokedCallback(OnBackInvokedDispatcher.PRIORITY_DEFAULT, backToGrid);
+        else d.unregisterOnBackInvokedCallback(backToGrid);
+        backRegistered = on;
+    }
 
     // ---- self-update from GitHub releases ----
 
     @Override
     protected void onResume() {
         super.onResume();
-        // The History screen may have set or deleted wallpapers; pick up its changes.
-        history = new History(this, prefs());
+        // The History screen may have set or deleted wallpapers; Revert's state can have changed.
         if (!busy) enable(undo, history.canRevert());
         showUpdate();
         if (Updater.due(prefs())) worker.execute(() -> {
@@ -504,28 +736,32 @@ public class MainActivity extends Activity {
         });
     }
 
-    /** Claude's key is required; Unsplash and Pexels keys are optional and switch those sources on. */
+    // ---- keys ----
+
+    /** All keys are optional: Claude ranks results; Unsplash and Pexels switch those sources on. */
     private void askKey() {
         LinearLayout box = new LinearLayout(this);
         box.setOrientation(LinearLayout.VERTICAL);
         box.setPadding(dp(20), dp(4), dp(20), 0);
-        EditText claude = keyField(box, "Claude (required) · console.anthropic.com", KEY, "sk-ant-...");
-        EditText unsplash = keyField(box, "Unsplash (optional) · unsplash.com/developers", Sources.UNSPLASH + "_key",
-                "Access key");
-        EditText pexels = keyField(box, "Pexels (optional) · pexels.com/api", Sources.PEXELS + "_key", "API key");
+        EditText claude = keyField(box, "Claude (optional, paid) · AI ranking · console.anthropic.com", KEY,
+                "sk-ant-...");
+        EditText unsplash = keyField(box, "Unsplash (optional, free) · unsplash.com/developers",
+                Sources.UNSPLASH + "_key", "Access key");
+        EditText pexels = keyField(box, "Pexels (optional, free) · pexels.com/api", Sources.PEXELS + "_key",
+                "API key");
         new AlertDialog.Builder(this)
                 .setTitle("API keys")
-                .setMessage("Stored on this phone only. Wallhaven and Openverse need no key.")
+                .setMessage("All optional, stored on this phone only. Wallhaven and Openverse work without any key.")
                 .setView(box)
                 .setPositiveButton("Save", (d, b) -> {
                     String k = claude.getText().toString().trim();
                     prefs().edit()
+                            .putString(KEY, k)
                             .putString(Sources.UNSPLASH + "_key", unsplash.getText().toString().trim())
                             .putString(Sources.PEXELS + "_key", pexels.getText().toString().trim())
                             .apply();
-                    if (k.isEmpty()) return;
-                    prefs().edit().putString(KEY, k).apply();
-                    hunter = new Hunter(k);
+                    hunter = k.isEmpty() ? null : new Hunter(k);
+                    if (!busy && walls.isEmpty()) status.setText(intro());
                 })
                 .setNegativeButton("Cancel", null)
                 .show();
@@ -547,6 +783,8 @@ public class MainActivity extends Activity {
         return in;
     }
 
+    // ---- sources ----
+
     /** Sources this install can search: the keyless ones plus any whose key is set. */
     private List<String> available() {
         List<String> out = new ArrayList<>();
@@ -556,26 +794,52 @@ public class MainActivity extends Activity {
         return out;
     }
 
-    /** Tops {@code found} up to 12 from {@code sources}, split evenly; a failing source is noted and skipped. */
+    /**
+     * Tops {@code found} up to {@link #MAX_RESULTS}, searching {@code sources} in parallel and interleaving their
+     * results so no one source crowds the grid. A failing source is noted in {@code problems} and skipped.
+     */
     private void gather(List<Sources.Wall> found, List<String> sources, List<String> queries, int minW, int minH,
                         List<String> problems) {
-        int room = 12 - found.size();
+        int room = MAX_RESULTS - found.size();
         if (room <= 0 || sources.isEmpty()) return;
-        int each = Math.max(2, (room + sources.size() - 1) / sources.size());
+        int each = Math.max(4, (room + sources.size() - 1) / sources.size());
+        ExecutorService pool = Executors.newFixedThreadPool(sources.size());
+        List<Future<List<Sources.Wall>>> jobs = new ArrayList<>();
         for (String src : sources) {
-            if (found.size() >= 12) break;
+            String key = prefs().getString(src + "_key", "");
+            jobs.add(pool.submit(() -> Sources.search(src, key, queries, minW, minH, each)));
+        }
+        List<List<Sources.Wall>> lists = new ArrayList<>();
+        for (int i = 0; i < jobs.size(); i++) {
             try {
-                for (Sources.Wall w : Sources.search(src, prefs().getString(src + "_key", ""), queries, minW, minH,
-                        Math.min(each, 12 - found.size()))) {
-                    boolean dup = false;
-                    for (Sources.Wall f : found) dup |= f.id.equals(w.id);
-                    if (!dup) found.add(w);
-                }
-            } catch (IOException e) {
-                String p = Sources.name(src) + ": " + e.getMessage();
+                lists.add(jobs.get(i).get());
+            } catch (ExecutionException e) {
+                String p = Sources.name(sources.get(i)) + ": " + (e.getCause() == null ? e : e.getCause().getMessage());
                 if (!problems.contains(p)) problems.add(p);
+            } catch (InterruptedException e) {
+                Thread.currentThread().interrupt();
+                break;
             }
         }
+        pool.shutdown();
+        for (int r = 0; found.size() < MAX_RESULTS; r++) {
+            boolean any = false;
+            for (List<Sources.Wall> l : lists) {
+                if (r >= l.size() || found.size() >= MAX_RESULTS) continue;
+                any = true;
+                Sources.Wall w = l.get(r);
+                boolean dup = false;
+                for (Sources.Wall f : found) dup |= f.id.equals(w.id);
+                if (!dup) found.add(w);
+            }
+            if (!any) break;
+        }
+    }
+
+    private static List<String> sourcesOf(List<Sources.Wall> walls) {
+        List<String> out = new ArrayList<>();
+        for (Sources.Wall w : walls) if (!out.contains(w.source)) out.add(w.source);
+        return out;
     }
 
     private static String names(List<String> sources) {
@@ -583,6 +847,8 @@ public class MainActivity extends Activity {
         for (String s : sources) n.add(Sources.name(s));
         return String.join(" + ", n);
     }
+
+    // ---- state + helpers ----
 
     private void say(String s) { main.post(() -> status.setText(s)); }
 
@@ -596,8 +862,7 @@ public class MainActivity extends Activity {
     private void setBusy(boolean b) {
         busy = b;
         enable(hunt, !b);
-        for (Button x : new Button[]{source, home, lock, both}) enable(x, !b);
-        enable(next, !b && pos + 1 < picks.size());
+        for (Button x : new Button[]{back, source, home, lock, both}) enable(x, !b);
         enable(undo, !b && history.canRevert());
         enable(update, !b);
     }
@@ -605,11 +870,6 @@ public class MainActivity extends Activity {
     private static void enable(Button b, boolean on) {
         b.setEnabled(on);
         b.setAlpha(on ? 1f : 0.4f);
-    }
-
-    private void showResult(boolean on) {
-        int v = on ? View.VISIBLE : View.INVISIBLE;
-        for (View x : new View[]{preview, reason, credit, next, source, home, lock, both}) x.setVisibility(v);
     }
 
     private Rect screen() {
