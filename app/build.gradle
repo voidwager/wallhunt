@@ -1,5 +1,13 @@
 plugins { id 'com.android.application' }
 
+// Every release must be signed with the same key, or Android refuses to install it over the old one
+// and self-update breaks. The key's location and passwords live in the gitignored local.properties
+// (whsign.*); builds without them fall back to the machine's debug key.
+def localProps = new Properties()
+def localFile = rootProject.file('local.properties')
+if (localFile.exists()) localFile.withInputStream { localProps.load(it) }
+def pinnedKey = localProps.getProperty('whsign.store')
+
 android {
     namespace = 'dev.voidwager.wallhunt'
     compileSdk = 36
@@ -7,13 +15,28 @@ android {
         applicationId = 'dev.voidwager.wallhunt'
         minSdk = 30
         targetSdk = 36
-        versionCode = 2
-        versionName = '1.1'
+        // -PwhVersionCode / -PwhVersionName exist only to build an "older" copy for update testing.
+        versionCode = (project.findProperty('whVersionCode') ?: 3) as int
+        versionName = project.findProperty('whVersionName') ?: '1.2'
+    }
+    signingConfigs {
+        pinned {
+            if (pinnedKey != null) {
+                storeFile = file(pinnedKey)
+                storePassword = localProps.getProperty('whsign.storePassword')
+                keyAlias = localProps.getProperty('whsign.alias')
+                keyPassword = localProps.getProperty('whsign.keyPassword')
+            }
+        }
     }
     buildTypes {
         release {
             minifyEnabled = false
-            signingConfig = signingConfigs.debug   // personal sideload build
+            signingConfig = pinnedKey != null ? signingConfigs.pinned : signingConfigs.debug
+        }
+        debug {
+            // same key as releases, so a test build can update in place to a published release
+            if (pinnedKey != null) signingConfig = signingConfigs.pinned
         }
     }
     compileOptions {

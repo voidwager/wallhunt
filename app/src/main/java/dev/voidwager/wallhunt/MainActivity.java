@@ -44,7 +44,8 @@ import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 
 public class MainActivity extends Activity {
-    private static final String PREFS = "wh", KEY = "api_key";
+    static final String PREFS = "wh";
+    private static final String KEY = "api_key";
     private static final int BG = 0xFF15131C, CARD = 0xFF211E2B, INK = 0xFFECE8F2, DIM = 0xFF9A93A8, ACCENT = 0xFFE0A458;
 
     private final ExecutorService worker = Executors.newSingleThreadExecutor();
@@ -62,7 +63,7 @@ public class MainActivity extends Activity {
     private Bitmap current;
     private boolean busy;
     private History history;
-    private Button undo;
+    private Button undo, update;
 
     @Override
     protected void onCreate(Bundle state) {
@@ -109,6 +110,12 @@ public class MainActivity extends Activity {
         kp.leftMargin = dp(8);
         head.addView(keyBtn, kp);
         root.addView(head);
+
+        update = button("", true);
+        update.setVisibility(View.GONE);
+        LinearLayout.LayoutParams up = new LinearLayout.LayoutParams(-1, -2);
+        up.topMargin = dp(8);
+        root.addView(update, up);
 
         LinearLayout search = row();
         prompt = new EditText(this);
@@ -364,6 +371,57 @@ public class MainActivity extends Activity {
 
     // ---- state + helpers ----
 
+    // ---- self-update from GitHub releases ----
+
+    @Override
+    protected void onResume() {
+        super.onResume();
+        showUpdate();
+        if (Updater.due(prefs())) worker.execute(() -> {
+            Updater.check(prefs());
+            main.post(this::showUpdate);
+        });
+    }
+
+    /** Shows the update button only while GitHub has a release newer than this install. */
+    private void showUpdate() {
+        Updater.Release r = Updater.available(this, prefs());
+        update.setVisibility(r == null ? View.GONE : View.VISIBLE);
+        if (r == null) return;
+        update.setText("Update to " + r.version + " (" + r.size / (1024 * 1024) + " MB)");
+        update.setOnClickListener(v -> new AlertDialog.Builder(this)
+                .setTitle("Wallhunt " + r.version)
+                .setMessage(r.notes.isEmpty() ? "A newer version is on GitHub." : r.notes)
+                .setPositiveButton("Install", (d, x) -> installUpdate(r))
+                .setNegativeButton("Later", null)
+                .show());
+    }
+
+    private void installUpdate(Updater.Release r) {
+        if (busy) return;
+        if (!getPackageManager().canRequestPackageInstalls()) {
+            Toast.makeText(this, "Allow Wallhunt to install updates, then tap Update again.", Toast.LENGTH_LONG).show();
+            startActivity(new Intent(Settings.ACTION_MANAGE_UNKNOWN_APP_SOURCES, Uri.parse("package:" + getPackageName())));
+            return;
+        }
+        setBusy(true);
+        worker.execute(() -> {
+            try {
+                java.io.File apk = Updater.download(this, r, pct -> say("Downloading update… " + pct + "%"));
+                String err = Updater.verify(this, apk);
+                if (err != null) {
+                    fail("Update refused: " + err + ".");
+                    return;
+                }
+                say("Installing " + r.version + "…");
+                Updater.install(this, apk);
+                main.post(() -> setBusy(false));
+            } catch (IOException e) {
+                fail("Update failed: " + e.getMessage());
+            }
+        });
+    }
+
     private void askKey() {
         EditText in = new EditText(this);
         in.setHint("sk-ant-...");
@@ -398,6 +456,7 @@ public class MainActivity extends Activity {
         for (Button x : new Button[]{source, home, lock, both}) enable(x, !b);
         enable(next, !b && pos + 1 < picks.size());
         enable(undo, !b && history.canRevert());
+        enable(update, !b);
     }
 
     private static void enable(Button b, boolean on) {
