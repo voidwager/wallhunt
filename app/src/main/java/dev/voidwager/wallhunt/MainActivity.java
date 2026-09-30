@@ -46,7 +46,7 @@ import java.util.concurrent.Executors;
 public class MainActivity extends Activity {
     static final String PREFS = "wh";
     private static final String KEY = "api_key";
-    private static final int BG = 0xFF15131C, CARD = 0xFF211E2B, INK = 0xFFECE8F2, DIM = 0xFF9A93A8, ACCENT = 0xFFE0A458;
+    private static final int BG = Ui.BG, CARD = Ui.CARD, INK = Ui.INK, DIM = Ui.DIM, ACCENT = Ui.ACCENT;
 
     private final ExecutorService worker = Executors.newSingleThreadExecutor();
     private final Handler main = new Handler(Looper.getMainLooper());
@@ -64,6 +64,7 @@ public class MainActivity extends Activity {
     private boolean busy;
     private History history;
     private Button undo, update;
+    private String lastPrompt = "";
 
     @Override
     protected void onCreate(Bundle state) {
@@ -101,9 +102,14 @@ public class MainActivity extends Activity {
         title.setTextSize(22);
         title.setTypeface(android.graphics.Typeface.DEFAULT_BOLD);
         head.addView(title, new LinearLayout.LayoutParams(0, -2, 1));
+        Button histBtn = button("History", false);
+        histBtn.setOnClickListener(v -> startActivity(new Intent(this, HistoryActivity.class)));
+        head.addView(histBtn);
         undo = button("Revert", false);
         undo.setOnClickListener(v -> revert());
-        head.addView(undo);
+        LinearLayout.LayoutParams rp0 = new LinearLayout.LayoutParams(-2, -2);
+        rp0.leftMargin = dp(8);
+        head.addView(undo, rp0);
         Button keyBtn = button("Key", false);
         keyBtn.setOnClickListener(v -> askKey());
         LinearLayout.LayoutParams kp = new LinearLayout.LayoutParams(-2, -2);
@@ -237,6 +243,7 @@ public class MainActivity extends Activity {
                 }
                 main.post(() -> {
                     walls = found;
+                    lastPrompt = q;
                     picks = ranked;
                     showPick(0);
                 });
@@ -301,12 +308,13 @@ public class MainActivity extends Activity {
             return;
         }
         Bitmap bm = current;
+        String page = picks.isEmpty() ? "" : walls.get(picks.get(pos).index).page;
         setBusy(true);
         worker.execute(() -> {
             try {
                 ByteArrayOutputStream jpeg = new ByteArrayOutputStream();
                 bm.compress(Bitmap.CompressFormat.JPEG, 95, jpeg);
-                history.set(jpeg.toByteArray(), which);
+                history.set(jpeg.toByteArray(), which, lastPrompt, page);
                 main.post(() -> {
                     setBusy(false);
                     Toast.makeText(this, "Set on " + where, Toast.LENGTH_SHORT).show();
@@ -376,6 +384,9 @@ public class MainActivity extends Activity {
     @Override
     protected void onResume() {
         super.onResume();
+        // The History screen may have set or deleted wallpapers; pick up its changes.
+        history = new History(this, prefs());
+        if (!busy) enable(undo, history.canRevert());
         showUpdate();
         if (Updater.due(prefs())) worker.execute(() -> {
             Updater.check(prefs());
@@ -475,29 +486,11 @@ public class MainActivity extends Activity {
 
     private SharedPreferences prefs() { return getSharedPreferences(PREFS, MODE_PRIVATE); }
 
-    private LinearLayout row() {
-        LinearLayout l = new LinearLayout(this);
-        l.setOrientation(LinearLayout.HORIZONTAL);
-        l.setGravity(Gravity.CENTER_VERTICAL);
-        return l;
-    }
+    private LinearLayout row() { return Ui.row(this); }
 
-    private Button button(String label, boolean primary) {
-        Button b = new Button(this);
-        b.setText(label);
-        b.setAllCaps(false);
-        b.setTextColor(primary ? BG : INK);
-        b.setBackground(round(primary ? ACCENT : CARD, 12));
-        b.setStateListAnimator(null);
-        return b;
-    }
+    private Button button(String label, boolean primary) { return Ui.button(this, label, primary); }
 
-    private GradientDrawable round(int color, int r) {
-        GradientDrawable g = new GradientDrawable();
-        g.setColor(color);
-        g.setCornerRadius(dp(r));
-        return g;
-    }
+    private GradientDrawable round(int color, int r) { return Ui.round(this, color, r); }
 
-    private int dp(int v) { return Math.round(v * getResources().getDisplayMetrics().density); }
+    private int dp(int v) { return Ui.dp(this, v); }
 }

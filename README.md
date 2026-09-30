@@ -19,6 +19,10 @@ Android 11+.
 offers to save the one you have now, so Revert can take you all the way back. Android 13+ only lets apps read the
 current wallpaper with *All files access*; Wallhunt uses it for that single read, and you can skip it.
 
+**History** shows every wallpaper Wallhunt has set, newest first, with its prompt and the screens it was on. The
+same image set on two screens appears once. Tap one to set it again on home, lock or both, open it on Wallhaven,
+or delete it. The last 30 sets are kept, plus your saved original.
+
 ## Updates
 
 Wallhunt updates itself from this repo's GitHub releases. While the app is open it asks `api.github.com` for the
