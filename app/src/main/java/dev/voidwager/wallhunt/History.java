@@ -37,16 +37,19 @@ final class History {
 
     private static final class Entry {
         final int which;
-        final String file, hash, prompt, page;
+        final String file, hash, prompt, page, source, credit;
         final long time;
         final boolean original;
 
-        Entry(int which, String file, String hash, String prompt, String page, long time, boolean original) {
+        Entry(int which, String file, String hash, String prompt, String page, String source, String credit,
+              long time, boolean original) {
             this.which = which;
             this.file = file;
             this.hash = hash;
             this.prompt = prompt;
             this.page = page;
+            this.source = source;
+            this.credit = credit;
             this.time = time;
             this.original = original;
         }
@@ -55,7 +58,7 @@ final class History {
     /** One distinct wallpaper for the History screen: every set of the same image, merged. */
     static final class Item {
         File file;
-        String hash, prompt = "", page = "";
+        String hash, prompt = "", page = "", source = "", credit = "";
         long time;
         int screens;
         boolean original;
@@ -83,8 +86,11 @@ final class History {
                     hash = hash(Files.readAllBytes(f.toPath()));
                     upgraded = true;
                 }
-                log.add(new Entry(o.getInt("which"), f.getName(), hash, o.optString("prompt"), o.optString("page"),
-                        o.optLong("time", f.lastModified()), o.optBoolean("original")));
+                String page = o.optString("page");
+                // entries from before 1.4 were all Wallhaven
+                String source = o.optString("source", page.isEmpty() ? "" : Sources.WALLHAVEN);
+                log.add(new Entry(o.getInt("which"), f.getName(), hash, o.optString("prompt"), page, source,
+                        o.optString("credit"), o.optLong("time", f.lastModified()), o.optBoolean("original")));
             }
         } catch (JSONException | IOException e) {
             log.clear();
@@ -93,22 +99,23 @@ final class History {
     }
 
     /** Sets {@code jpeg} on {@code which}, saving what was there first so it can be reverted. */
-    synchronized void set(byte[] jpeg, int which, String prompt, String page) throws IOException {
+    synchronized void set(byte[] jpeg, int which, String prompt, String source, String page, String credit)
+            throws IOException {
         for (int s : SCREENS) {
             if ((which & s) != 0 && latest(s, log.size()) == null) {
                 byte[] now = readCurrent(s);
-                if (now != null) add(s, now, "", "", true);
+                if (now != null) add(s, now, "", "", "", "", true);
             }
         }
         try (InputStream in = new ByteArrayInputStream(jpeg)) {
             wm.setStream(in, null, true, which);
         }
-        add(which, jpeg, prompt, page, false);
+        add(which, jpeg, prompt, source, page, credit, false);
     }
 
     /** Sets a History item again. It becomes the newest entry, so Revert undoes it like any other set. */
     synchronized void reuse(Item item, int which) throws IOException {
-        set(Files.readAllBytes(item.file.toPath()), which, item.prompt, item.page);
+        set(Files.readAllBytes(item.file.toPath()), which, item.prompt, item.source, item.page, item.credit);
     }
 
     /** True when a screen in {@code which} has never been set by Wallhunt, so its original isn't saved yet. */
@@ -164,7 +171,11 @@ final class History {
             it.screens |= e.which;
             it.original |= e.original;
             if (it.prompt.isEmpty()) it.prompt = e.prompt;
-            if (it.page.isEmpty()) it.page = e.page;
+            if (it.page.isEmpty()) {
+                it.page = e.page;
+                it.source = e.source;
+                it.credit = e.credit;
+            }
         }
         return new ArrayList<>(byHash.values());
     }
@@ -200,7 +211,8 @@ final class History {
         }
     }
 
-    private void add(int which, byte[] data, String prompt, String page, boolean original) throws IOException {
+    private void add(int which, byte[] data, String prompt, String source, String page, String credit,
+                     boolean original) throws IOException {
         long now = System.currentTimeMillis();
         String hash = hash(data);
         // The same image already on disk (set before, or on another screen) shares its file.
@@ -212,7 +224,7 @@ final class History {
                 out.write(data);
             }
         }
-        log.add(new Entry(which, file, hash, prompt == null ? "" : prompt, page == null ? "" : page, now, original));
+        log.add(new Entry(which, file, hash, nz(prompt), nz(page), nz(source), nz(credit), now, original));
         // Trim the oldest Wallhunt sets; originals stay so a full revert is always possible.
         for (int i = 0; log.size() > MAX && i < log.size(); ) {
             if (log.get(i).original) { i++; continue; }
@@ -233,7 +245,8 @@ final class History {
         try {
             for (Entry e : log) {
                 a.put(new JSONObject().put("which", e.which).put("file", e.file).put("hash", e.hash)
-                        .put("prompt", e.prompt).put("page", e.page).put("time", e.time).put("original", e.original));
+                        .put("prompt", e.prompt).put("page", e.page).put("source", e.source).put("credit", e.credit)
+                        .put("time", e.time).put("original", e.original));
             }
         } catch (JSONException ignored) {
             // put() only throws on non-finite numbers
@@ -250,6 +263,8 @@ final class History {
             throw new IllegalStateException(e);
         }
     }
+
+    private static String nz(String s) { return s == null ? "" : s; }
 
     private static String name(int screen) {
         return screen == HOME ? "home screen" : "lock screen";

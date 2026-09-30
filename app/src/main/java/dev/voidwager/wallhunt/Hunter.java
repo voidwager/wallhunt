@@ -24,7 +24,7 @@ import java.util.List;
 import java.util.Map;
 
 /**
- * The two Claude calls: prompt -> Wallhaven queries, then thumbnails -> ranked picks.
+ * The two Claude calls: prompt -> which sources to search and with what queries, then thumbnails -> ranked picks.
  * Schemas are written by hand: the SDK's class-derived schemas call Field.getAnnotatedType(), which ART lacks.
  */
 final class Hunter {
@@ -32,6 +32,7 @@ final class Hunter {
 
     static final class Plan {
         final List<String> queries = new ArrayList<>();
+        final List<String> sources = new ArrayList<>();
         String look;
     }
 
@@ -40,13 +41,17 @@ final class Hunter {
         String why;
     }
 
-    private static final JsonOutputFormat PLAN_FORMAT = format(object(Map.of(
-            "queries", Map.of("type", "array", "items", Map.of("type", "string"),
-                    "description", "2 or 3 Wallhaven search queries, most literal first. Each is 1-3 plain keywords "
-                            + "that would appear as tags (e.g. 'rain city night', 'minimalist mountains'). "
-                            + "No quotes or operators."),
-            "look", Map.of("type", "string",
-                    "description", "One sentence on what the ideal wallpaper looks like, used to judge candidates."))));
+    /** The plan schema, limited to the sources this install can search. */
+    private static JsonOutputFormat planFormat(List<String> available) {
+        return format(object(Map.of(
+                "sources", Map.of("type", "array", "items", Map.of("type", "string", "enum", available),
+                        "description", "1 or 2 sources that suit this request, best first."),
+                "queries", Map.of("type", "array", "items", Map.of("type", "string"),
+                        "description", "2 or 3 search queries, most literal first. Each is 1-3 plain keywords "
+                                + "(e.g. 'rain city night', 'minimalist mountains'). No quotes or operators."),
+                "look", Map.of("type", "string",
+                        "description", "One sentence on what the ideal wallpaper looks like, used to judge candidates."))));
+    }
 
     private static final JsonOutputFormat RANK_FORMAT = format(object(Map.of(
             "picks", Map.of("type", "array",
@@ -68,14 +73,16 @@ final class Hunter {
         client = AnthropicOkHttpClient.builder().apiKey(apiKey).build();
     }
 
-    Plan plan(String prompt) throws RefusedException {
+    Plan plan(String prompt, List<String> available) throws RefusedException {
+        StringBuilder menu = new StringBuilder();
+        for (String src : available) menu.append("\n- ").append(src).append(": ").append(Sources.strength(src));
         MessageCreateParams params = MessageCreateParams.builder()
                 .model(MODEL)
                 .maxTokens(4000L)
-                .outputConfig(OutputConfig.builder().effort(OutputConfig.Effort.LOW).format(PLAN_FORMAT).build())
-                .system("You turn a phone wallpaper request into searches on wallhaven.cc, whose search "
-                        + "matches short tag-like keywords. Long phrases return nothing. Read the mood behind "
-                        + "the request, not only its nouns.")
+                .outputConfig(OutputConfig.builder().effort(OutputConfig.Effort.LOW).format(planFormat(available)).build())
+                .system("You turn a phone wallpaper request into image searches. Every source matches short "
+                        + "keywords; long phrases return nothing. Read the mood behind the request, not only its "
+                        + "nouns, and pick the sources whose strengths fit it:" + menu)
                 .addUserMessage(prompt)
                 .putAdditionalHeader("anthropic-beta", "server-side-fallback-2026-07-01")
                 .putAdditionalBodyProperty("fallbacks", JsonValue.from("default"))
@@ -85,6 +92,12 @@ final class Hunter {
             Plan plan = new Plan();
             JSONArray q = o.getJSONArray("queries");
             for (int i = 0; i < q.length(); i++) plan.queries.add(q.getString(i));
+            JSONArray src = o.getJSONArray("sources");
+            for (int i = 0; i < src.length(); i++) {
+                String id = src.getString(i);
+                if (available.contains(id) && !plan.sources.contains(id)) plan.sources.add(id);
+            }
+            if (plan.sources.isEmpty()) plan.sources.add(available.get(0));
             plan.look = o.getString("look");
             return plan;
         } catch (JSONException e) {
@@ -92,7 +105,7 @@ final class Hunter {
         }
     }
 
-    List<Pick> rank(String prompt, String look, List<Wallhaven.Wall> walls, List<byte[]> thumbs)
+    List<Pick> rank(String prompt, String look, List<Sources.Wall> walls, List<byte[]> thumbs)
             throws RefusedException {
         List<ContentBlockParam> blocks = new ArrayList<>();
         blocks.add(text("Request: " + prompt + "\nIdeal: " + look
@@ -100,8 +113,9 @@ final class Hunter {
                 + "on screen. Judge each as a home screen: it sits behind icons and a clock, so busy detail "
                 + "in the middle and top thirds hurts, and a subject cut off by the frame is a flaw."));
         for (int i = 0; i < walls.size(); i++) {
-            Wallhaven.Wall w = walls.get(i);
-            blocks.add(text("Candidate " + i + " (" + w.resolution + ", " + w.favorites + " favourites)"));
+            Sources.Wall w = walls.get(i);
+            blocks.add(text("Candidate " + i + " (" + Sources.name(w.source) + ", " + w.resolution
+                    + (w.favorites > 0 ? ", " + w.favorites + " favourites" : "") + ")"));
             blocks.add(ContentBlockParam.ofImage(ImageBlockParam.builder()
                     .source(Base64ImageSource.builder()
                             .mediaType(Base64ImageSource.MediaType.IMAGE_JPEG)

@@ -53,11 +53,11 @@ public class MainActivity extends Activity {
 
     private EditText prompt;
     private Button hunt, next, home, lock, both, source;
-    private TextView status, reason;
+    private TextView status, reason, credit;
     private ImageView preview;
 
     private Hunter hunter;
-    private List<Wallhaven.Wall> walls = new ArrayList<>();
+    private List<Sources.Wall> walls = new ArrayList<>();
     private List<Hunter.Pick> picks = new ArrayList<>();
     private int pos;
     private Bitmap current;
@@ -110,7 +110,7 @@ public class MainActivity extends Activity {
         LinearLayout.LayoutParams rp0 = new LinearLayout.LayoutParams(-2, -2);
         rp0.leftMargin = dp(8);
         head.addView(undo, rp0);
-        Button keyBtn = button("Key", false);
+        Button keyBtn = button("Keys", false);
         keyBtn.setOnClickListener(v -> askKey());
         LinearLayout.LayoutParams kp = new LinearLayout.LayoutParams(-2, -2);
         kp.leftMargin = dp(8);
@@ -150,7 +150,7 @@ public class MainActivity extends Activity {
         status = new TextView(this);
         status.setTextColor(DIM);
         status.setTextSize(13);
-        status.setText("Describe a wallpaper. Claude searches Wallhaven, looks at what it finds and ranks it.");
+        status.setText("Describe a wallpaper. Claude picks where to search, looks at what it finds and ranks it.");
         LinearLayout.LayoutParams stp = new LinearLayout.LayoutParams(-1, -2);
         stp.topMargin = dp(10);
         root.addView(status, stp);
@@ -169,10 +169,22 @@ public class MainActivity extends Activity {
         rp.topMargin = dp(8);
         root.addView(reason, rp);
 
+        credit = new TextView(this);
+        credit.setTextColor(DIM);
+        credit.setTextSize(12);
+        credit.setGravity(Gravity.CENTER_HORIZONTAL);
+        credit.setOnClickListener(v -> {
+            Sources.Wall w = walls.get(picks.get(pos).index);
+            if (!w.creditUrl.isEmpty()) startActivity(new Intent(Intent.ACTION_VIEW, Uri.parse(w.creditUrl)));
+        });
+        LinearLayout.LayoutParams crp = new LinearLayout.LayoutParams(-1, -2);
+        crp.topMargin = dp(2);
+        root.addView(credit, crp);
+
         LinearLayout nav = row();
         next = button("Next pick", false);
         next.setOnClickListener(v -> showPick(pos + 1));
-        source = button("Open on Wallhaven", false);
+        source = button("Open source", false);
         source.setOnClickListener(v -> startActivity(new Intent(Intent.ACTION_VIEW,
                 Uri.parse(walls.get(picks.get(pos).index).page))));
         nav.addView(next, new LinearLayout.LayoutParams(0, -2, 1));
@@ -211,30 +223,35 @@ public class MainActivity extends Activity {
         worker.execute(() -> {
             try {
                 say("Claude is working out what to search for...");
-                Hunter.Plan plan = hunter.plan(q);
-                say("Searching Wallhaven: " + String.join(" / ", plan.queries));
+                List<String> available = available();
+                Hunter.Plan plan = hunter.plan(q, available);
                 int minW = Math.min(screen.width(), 1080), minH = Math.min(screen.height(), 1920);
-                List<Wallhaven.Wall> found = Wallhaven.search(plan.queries, minW, minH, 6, 12);
+                List<Sources.Wall> found = new ArrayList<>();
+                List<String> problems = new ArrayList<>();
+                say("Searching " + names(plan.sources) + ": " + String.join(" / ", plan.queries));
+                gather(found, plan.sources, plan.queries, minW, minH, problems);
+                List<String> others = new ArrayList<>(available);
+                others.removeAll(plan.sources);
+                if (found.size() < 4 && !others.isEmpty()) {
+                    say("Few matches, also trying " + names(others) + "...");
+                    gather(found, others, plan.queries, minW, minH, problems);
+                }
                 if (found.size() < 4) {
-                    // Portrait walls are scarce; retry each query on its leading keyword before giving up.
+                    // Portrait images are scarce; retry each query on its leading keyword before giving up.
                     List<String> broad = new ArrayList<>();
                     for (String s : plan.queries) broad.add(s.trim().split("\\s+")[0]);
-                    say("Few matches, widening to: " + String.join(" / ", broad));
-                    for (Wallhaven.Wall w : Wallhaven.search(broad, minW, minH, 6, 12)) {
-                        if (found.size() >= 12) break;
-                        boolean dup = false;
-                        for (Wallhaven.Wall f : found) dup |= f.id.equals(w.id);
-                        if (!dup) found.add(w);
-                    }
+                    say("Still few, widening to: " + String.join(" / ", broad));
+                    gather(found, available, broad, minW, minH, problems);
                 }
                 if (found.isEmpty()) {
-                    fail("No portrait wallpapers matched " + plan.queries + ". Try broader words.");
+                    fail("No portrait images matched " + plan.queries + ". Try broader words."
+                            + (problems.isEmpty() ? "" : "\n" + String.join("\n", problems)));
                     return;
                 }
                 say("Fetching " + found.size() + " thumbnails...");
                 List<byte[]> thumbs = new ArrayList<>();
                 // Crop each thumbnail the way fitScreen will crop the full image, so Claude judges what you get.
-                for (Wallhaven.Wall w : found) thumbs.add(screenCrop(Wallhaven.get(w.thumb), screen));
+                for (Sources.Wall w : found) thumbs.add(screenCrop(Sources.get(w.thumb), screen));
                 say("Claude is looking at " + found.size() + " candidates...");
                 List<Hunter.Pick> ranked = hunter.rank(q, plan.look, found, thumbs);
                 if (ranked.isEmpty()) {
@@ -250,7 +267,7 @@ public class MainActivity extends Activity {
             } catch (Hunter.RefusedException e) {
                 fail(e.getMessage());
             } catch (UnauthorizedException | PermissionDeniedException e) {
-                fail("The API key was rejected. Tap Key to replace it.");
+                fail("The Claude API key was rejected. Tap Keys to replace it.");
             } catch (RateLimitException e) {
                 fail("Rate limited by the Claude API. Wait a minute and try again.");
             } catch (AnthropicServiceException e) {
@@ -267,18 +284,20 @@ public class MainActivity extends Activity {
         if (i >= picks.size() || busy) return;
         pos = i;
         Hunter.Pick p = picks.get(i);
-        Wallhaven.Wall w = walls.get(p.index);
+        Sources.Wall w = walls.get(p.index);
         setBusy(true);
         Rect screen = screen();
         worker.execute(() -> {
             try {
                 say("Downloading pick " + (i + 1) + " of " + picks.size() + " (" + w.resolution + ")...");
-                Bitmap bm = fitScreen(Wallhaven.get(w.full), screen.width(), screen.height());
+                Bitmap bm = fitScreen(Sources.get(w.full), screen.width(), screen.height());
                 main.post(() -> {
                     if (current != null) current.recycle();
                     current = bm;
                     preview.setImageBitmap(bm);
                     reason.setText(p.why);
+                    credit.setText(w.credit);
+                    source.setText("Open on " + Sources.name(w.source));
                     status.setText("Pick " + (i + 1) + " of " + picks.size() + " · " + w.resolution);
                     setBusy(false);
                     showResult(true);
@@ -308,13 +327,17 @@ public class MainActivity extends Activity {
             return;
         }
         Bitmap bm = current;
-        String page = picks.isEmpty() ? "" : walls.get(picks.get(pos).index).page;
+        Sources.Wall w = picks.isEmpty() ? null : walls.get(picks.get(pos).index);
         setBusy(true);
         worker.execute(() -> {
             try {
                 ByteArrayOutputStream jpeg = new ByteArrayOutputStream();
                 bm.compress(Bitmap.CompressFormat.JPEG, 95, jpeg);
-                history.set(jpeg.toByteArray(), which, lastPrompt, page);
+                if (w == null) history.set(jpeg.toByteArray(), which, lastPrompt, "", "", "");
+                else {
+                    history.set(jpeg.toByteArray(), which, lastPrompt, w.source, w.page, w.credit);
+                    Sources.reportUse(w, prefs().getString(Sources.UNSPLASH + "_key", ""));
+                }
                 main.post(() -> {
                     setBusy(false);
                     Toast.makeText(this, "Set on " + where, Toast.LENGTH_SHORT).show();
@@ -433,23 +456,84 @@ public class MainActivity extends Activity {
         });
     }
 
+    /** Claude's key is required; Unsplash and Pexels keys are optional and switch those sources on. */
     private void askKey() {
-        EditText in = new EditText(this);
-        in.setHint("sk-ant-...");
-        in.setInputType(InputType.TYPE_CLASS_TEXT | InputType.TYPE_TEXT_VARIATION_PASSWORD);
-        in.setText(prefs().getString(KEY, ""));
+        LinearLayout box = new LinearLayout(this);
+        box.setOrientation(LinearLayout.VERTICAL);
+        box.setPadding(dp(20), dp(4), dp(20), 0);
+        EditText claude = keyField(box, "Claude (required) · console.anthropic.com", KEY, "sk-ant-...");
+        EditText unsplash = keyField(box, "Unsplash (optional) · unsplash.com/developers", Sources.UNSPLASH + "_key",
+                "Access key");
+        EditText pexels = keyField(box, "Pexels (optional) · pexels.com/api", Sources.PEXELS + "_key", "API key");
         new AlertDialog.Builder(this)
-                .setTitle("Claude API key")
-                .setMessage("Stored on this phone only. Create one at console.anthropic.com.")
-                .setView(in)
+                .setTitle("API keys")
+                .setMessage("Stored on this phone only. Wallhaven and Openverse need no key.")
+                .setView(box)
                 .setPositiveButton("Save", (d, b) -> {
-                    String k = in.getText().toString().trim();
+                    String k = claude.getText().toString().trim();
+                    prefs().edit()
+                            .putString(Sources.UNSPLASH + "_key", unsplash.getText().toString().trim())
+                            .putString(Sources.PEXELS + "_key", pexels.getText().toString().trim())
+                            .apply();
                     if (k.isEmpty()) return;
                     prefs().edit().putString(KEY, k).apply();
                     hunter = new Hunter(k);
                 })
                 .setNegativeButton("Cancel", null)
                 .show();
+    }
+
+    private EditText keyField(LinearLayout box, String label, String pref, String hint) {
+        TextView l = new TextView(this);
+        l.setText(label);
+        l.setTextSize(12);
+        LinearLayout.LayoutParams lp = new LinearLayout.LayoutParams(-1, -2);
+        lp.topMargin = dp(10);
+        box.addView(l, lp);
+        EditText in = new EditText(this);
+        in.setHint(hint);
+        in.setSingleLine(true);
+        in.setInputType(InputType.TYPE_CLASS_TEXT | InputType.TYPE_TEXT_VARIATION_PASSWORD);
+        in.setText(prefs().getString(pref, ""));
+        box.addView(in);
+        return in;
+    }
+
+    /** Sources this install can search: the keyless ones plus any whose key is set. */
+    private List<String> available() {
+        List<String> out = new ArrayList<>();
+        for (String src : Sources.ALL) {
+            if (!Sources.needsKey(src) || !prefs().getString(src + "_key", "").isEmpty()) out.add(src);
+        }
+        return out;
+    }
+
+    /** Tops {@code found} up to 12 from {@code sources}, split evenly; a failing source is noted and skipped. */
+    private void gather(List<Sources.Wall> found, List<String> sources, List<String> queries, int minW, int minH,
+                        List<String> problems) {
+        int room = 12 - found.size();
+        if (room <= 0 || sources.isEmpty()) return;
+        int each = Math.max(2, (room + sources.size() - 1) / sources.size());
+        for (String src : sources) {
+            if (found.size() >= 12) break;
+            try {
+                for (Sources.Wall w : Sources.search(src, prefs().getString(src + "_key", ""), queries, minW, minH,
+                        Math.min(each, 12 - found.size()))) {
+                    boolean dup = false;
+                    for (Sources.Wall f : found) dup |= f.id.equals(w.id);
+                    if (!dup) found.add(w);
+                }
+            } catch (IOException e) {
+                String p = Sources.name(src) + ": " + e.getMessage();
+                if (!problems.contains(p)) problems.add(p);
+            }
+        }
+    }
+
+    private static String names(List<String> sources) {
+        List<String> n = new ArrayList<>();
+        for (String s : sources) n.add(Sources.name(s));
+        return String.join(" + ", n);
     }
 
     private void say(String s) { main.post(() -> status.setText(s)); }
@@ -477,7 +561,7 @@ public class MainActivity extends Activity {
 
     private void showResult(boolean on) {
         int v = on ? View.VISIBLE : View.INVISIBLE;
-        for (View x : new View[]{preview, reason, next, source, home, lock, both}) x.setVisibility(v);
+        for (View x : new View[]{preview, reason, credit, next, source, home, lock, both}) x.setVisibility(v);
     }
 
     private Rect screen() {

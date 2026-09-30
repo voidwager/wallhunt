@@ -191,7 +191,8 @@ public class HistoryActivity extends Activity {
 
         TextView info = new TextView(this);
         info.setText((!item.prompt.isEmpty() ? "“" + item.prompt + "”" : item.original ? "Your original wallpaper" : "Wallpaper")
-                + "\n" + when.format(new Date(item.time)) + " · was on " + screens(item.screens));
+                + "\n" + when.format(new Date(item.time)) + " · was on " + screens(item.screens)
+                + (item.credit.isEmpty() ? "" : "\n" + item.credit));
         info.setTextColor(Ui.INK);
         info.setGravity(Gravity.CENTER_HORIZONTAL);
         LinearLayout.LayoutParams ip = new LinearLayout.LayoutParams(-1, -2);
@@ -217,7 +218,7 @@ public class HistoryActivity extends Activity {
 
         LinearLayout more = Ui.row(this);
         if (!item.page.isEmpty()) {
-            Button src = Ui.button(this, "Wallhaven", false);
+            Button src = Ui.button(this, item.source.isEmpty() ? "Source" : Sources.name(item.source), false);
             src.setOnClickListener(v -> startActivity(new Intent(Intent.ACTION_VIEW, Uri.parse(item.page))));
             more.addView(src, new LinearLayout.LayoutParams(0, -2, 1));
         }
